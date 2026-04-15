@@ -158,6 +158,7 @@ class DiveHeader:
     firmware_version: tuple[int, int] | None  # (major, minor) from 0x18 block
     gf_min: int
     gf_max: int
+    surface_interval_min: int             # minutes since previous dive ended
     dive_start_epoch: int
     dive_end_epoch: int | None
     max_depth_m: float                    # footer-reported max depth
@@ -196,6 +197,10 @@ def _build_header(
     dive_number = h10[3]
     gf_min = h10[4]
     gf_max = h10[5]
+    # Surface interval (minutes) — verified against firmware: header writer
+    # at flash 0x080329a6 computes (BKP_SRAM[0x298] + 59) / 60 and stores
+    # the result big-endian here, capped at 0xFFFF.
+    surface_interval_min = struct.unpack_from(">H", h10, 6)[0]
     dive_start_epoch = struct.unpack_from(">I", h10, 12)[0]
 
     product_id = struct.unpack_from(">H", h11, 14)[0]
@@ -241,6 +246,7 @@ def _build_header(
         firmware_version=firmware_version,
         gf_min=gf_min,
         gf_max=gf_max,
+        surface_interval_min=surface_interval_min,
         dive_start_epoch=dive_start_epoch,
         dive_end_epoch=dive_end_epoch,
         max_depth_m=max_depth_m,
@@ -348,6 +354,7 @@ if __name__ == "__main__":
         print(f"firmware         = build={h.firmware_build} version={h.firmware_version}")
         print(f"dive number      = {h.dive_number}")
         print(f"gf               = {h.gf_min}/{h.gf_max}")
+        print(f"surface interval = {h.surface_interval_min} min")
         print(f"dive start (UTC) = {h.dive_start_utc}  ({h.dive_start_epoch})")
         print(f"dive end   (UTC) = {h.dive_end_utc}  ({h.dive_end_epoch})")
         print(f"max depth        = {h.max_depth_m} m")
