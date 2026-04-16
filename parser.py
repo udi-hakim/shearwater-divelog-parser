@@ -140,8 +140,20 @@ class RawBlock:
 
 
 _PRODUCT_IDS = {
-    0x1E50: "Petrel 3",
-    0x2855: "Tern",
+    0x1E50: "Petrel/Perdix family",
+    0x2855: "Tern family",
+}
+
+# Within a product family, block 0x11 byte 12 disambiguates the exact
+# device + dive-mode combination. Observed values (add new entries as
+# new logs are sighted):
+#
+#   (family, model_code)  ->  human-readable label
+_MODEL_CODES = {
+    (0x1E50, 0x03): "Perdix 2 SA CCR",
+    (0x1E50, 0x09): "Petrel 3 HW JJCCR",
+    (0x1E50, 0x0C): "Petrel 3 SA CCR",
+    (0x2855, 0x05): "Tern OC",
 }
 
 
@@ -152,8 +164,9 @@ class DiveHeader:
     """
     dive_number: int
     serial_hex: str                       # e.g. "B2F10222"
-    product_id: int                       # raw 16-bit id
-    product_name: str                     # best-effort decode ("Petrel 3", "Tern", …)
+    product_id: int                       # raw 16-bit family id (block 0x11+14..15)
+    model_code: int                       # disambiguator within family (block 0x11+12)
+    product_name: str                     # best-effort decode ("Petrel 3 SA CCR", "Perdix 2 SA CCR", "Tern OC", …)
     firmware_build: str | None            # ASCII build id, e.g. "11301-10" if present
     firmware_version: tuple[int, int] | None  # (major, minor) from 0x18 block
     gf_min: int
@@ -204,6 +217,7 @@ def _build_header(
     dive_start_epoch = struct.unpack_from(">I", h10, 12)[0]
 
     product_id = struct.unpack_from(">H", h11, 14)[0]
+    model_code = h11[12]
     start_surface = struct.unpack_from(">H", h11, 16)[0]
     serial_hex = h11[18:22].hex().upper()
 
@@ -237,11 +251,19 @@ def _build_header(
     if f24:
         end_batt = struct.unpack_from(">H", f24, 5)[0] / 100.0
 
+    product_name = _MODEL_CODES.get(
+        (product_id, model_code),
+        _PRODUCT_IDS.get(
+            product_id,
+            f"unknown(family=0x{product_id:04x},model=0x{model_code:02x})",
+        ),
+    )
     return DiveHeader(
         dive_number=dive_number,
         serial_hex=serial_hex,
         product_id=product_id,
-        product_name=_PRODUCT_IDS.get(product_id, f"unknown(0x{product_id:04x})"),
+        model_code=model_code,
+        product_name=product_name,
         firmware_build=firmware_build,
         firmware_version=firmware_version,
         gf_min=gf_min,
