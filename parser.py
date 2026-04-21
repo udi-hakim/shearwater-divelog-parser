@@ -150,7 +150,8 @@ class RawBlock:
 # three-dive smoke test. Verified across 120 dives that bytes 10-11 give a
 # stable per-device code and h11[14:16]BE == (h10[4]<<8 | h10[5]).
 _DEVICE_FAMILIES = {
-    0x1501: "Petrel 3",
+    0x1501: "Petrel/Perdix",  # shared family code for Petrel 3, Perdix 2,
+                              # and likely older Petrel/Perdix variants
     0x1400: "Tern",
 }
 
@@ -159,6 +160,7 @@ _DEVICE_FAMILIES = {
 _DEVICE_MODELS = {
     (0x1501, 0x0C): "Petrel 3 SA CCR",
     (0x1501, 0x09): "Petrel 3 HW JJCCR",
+    (0x1501, 0x03): "Perdix 2 SA CCR",
     (0x1400, 0x05): "Tern OC",
 }
 

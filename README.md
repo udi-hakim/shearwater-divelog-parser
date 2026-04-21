@@ -8,16 +8,20 @@ sample-by-sample against the CSV, so values are guaranteed to round-trip.
 
 ## Status
 
-Validated on three dives (1,583 samples total) across three computer / mode
-combinations:
+Validated against Shearwater Cloud CSV exports on four dives across four
+computer / mode combinations — 3,019 samples total, 14 / 14 fields match
+exactly on every sample:
 
 | Computer | Mode | Samples | Fields verified |
 |---|---|---|---|
-| Petrel 3 | Stand-alone CCR | 668 | 14 / 14 |
-| Petrel 3 | Hard-wired JJCCR | 664 | 14 / 14 |
-| Tern     | OC nitrox       | 251 | 14 / 14 |
+| Petrel 3 | Stand-alone CCR   | 668   | 14 / 14 |
+| Petrel 3 | Hard-wired JJCCR  | 664   | 14 / 14 |
+| Perdix 2 | Stand-alone CCR   | 1,436 | 14 / 14 |
+| Tern     | OC nitrox         | 251   | 14 / 14 |
 
-Currently targets **log version 14** (Petrel 3) and **log version 17** (Tern).
+Parses cleanly (0 errors, 0 unmapped record types) on a 120-dive bulk
+sample of 56,486 samples covering Petrel 3 SA CCR, Petrel 3 HW JJCCR, and
+Tern OC including freedive sessions.
 
 ## What it decodes
 
