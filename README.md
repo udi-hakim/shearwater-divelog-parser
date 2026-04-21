@@ -116,8 +116,7 @@ python3 scan.py <file.swlogdata>
 
 ## License
 
-MIT — see `LICENSE` if present, otherwise consider the contents under MIT
-unless and until a license file is added.
+MIT — see [`LICENSE`](LICENSE).
 
 ## Disclaimer
 
