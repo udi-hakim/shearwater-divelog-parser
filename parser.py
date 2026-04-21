@@ -1,14 +1,15 @@
-"""Parser for Shearwater .swlogdata files (Petrel 3, log version 14).
+"""Parser for Shearwater .swlogdata files (Petrel 3 and Tern).
 
 The file is a stream of 32-byte records. The first byte of each record is a tag.
 
-Record layout (confirmed against CSV export for Petrel 3, log v14):
+Record layout (verified against 120 dives on Petrel 3 + Tern):
 
-  0x10-0x18    Header TLV blocks (dive metadata, gas list, settings, etc.)
-  0x20-0x27    Footer TLV blocks (end-of-dive mirror of header)
+  0x10-0x19    Header TLV blocks (dive metadata, gas list, settings, etc.)
+  0x20-0x29    Footer TLV blocks (end-of-dive mirror of header)
   0x80-0x87    Bitmap blocks (per-sample event flags, 32 bits each)
   0xa0-0xa1    Bitmap blocks (additional flags)
-  0x01         Per-sample record (~every 10 s)
+  0x01         Per-sample record (~every 10 s, scuba profile)
+  0x02         Freedive sample record (Tern freedive mode; layout not yet mapped)
   0x30         Timestamp/state block (carries dive-start epoch)
   0x51         Event marker (gas switch, setpoint change, etc.)
   0x70-0x75    Tissue saturation snapshot (one group per snapshot, 16 compartments)
@@ -139,21 +140,26 @@ class RawBlock:
     data: bytes
 
 
-_PRODUCT_IDS = {
-    0x1E50: "Petrel/Perdix family",
-    0x2855: "Tern family",
+# Device family lives at bytes 10-11 (BE u16) of the 0x11 header block and
+# is stable across dives on the same physical computer. Mode lives at byte
+# 12 and varies per dive.
+#
+# The earlier revision of this parser read bytes 14-15 as a "product id";
+# that turned out to be the GF setting (duplicated from h10[4:6]), which
+# happened to match 0x1E50 / 0x2855 often enough to pass the original
+# three-dive smoke test. Verified across 120 dives that bytes 10-11 give a
+# stable per-device code and h11[14:16]BE == (h10[4]<<8 | h10[5]).
+_DEVICE_FAMILIES = {
+    0x1501: "Petrel 3",
+    0x1400: "Tern",
 }
 
-# Within a product family, block 0x11 byte 12 disambiguates the exact
-# device + dive-mode combination. Observed values (add new entries as
-# new logs are sighted):
-#
-#   (family, model_code)  ->  human-readable label
-_MODEL_CODES = {
-    (0x1E50, 0x03): "Perdix 2 SA CCR",
-    (0x1E50, 0x09): "Petrel 3 HW JJCCR",
-    (0x1E50, 0x0C): "Petrel 3 SA CCR",
-    (0x2855, 0x05): "Tern OC",
+# (device_family, mode_code) -> human-readable name. Add new entries as
+# new logs are sighted.
+_DEVICE_MODELS = {
+    (0x1501, 0x0C): "Petrel 3 SA CCR",
+    (0x1501, 0x09): "Petrel 3 HW JJCCR",
+    (0x1400, 0x05): "Tern OC",
 }
 
 
@@ -164,9 +170,9 @@ class DiveHeader:
     """
     dive_number: int
     serial_hex: str                       # e.g. "B2F10222"
-    product_id: int                       # raw 16-bit family id (block 0x11+14..15)
-    model_code: int                       # disambiguator within family (block 0x11+12)
-    product_name: str                     # best-effort decode ("Petrel 3 SA CCR", "Perdix 2 SA CCR", "Tern OC", …)
+    product_id: int                       # device family (block 0x11 bytes 10-11 BE)
+    model_code: int                       # dive-mode code (block 0x11 byte 12)
+    product_name: str                     # e.g. "Petrel 3 SA CCR", "Tern OC"
     firmware_build: str | None            # ASCII build id, e.g. "11301-10" if present
     firmware_version: tuple[int, int] | None  # (major, minor) from 0x18 block
     gf_min: int
@@ -216,7 +222,7 @@ def _build_header(
     surface_interval_min = struct.unpack_from(">H", h10, 6)[0]
     dive_start_epoch = struct.unpack_from(">I", h10, 12)[0]
 
-    product_id = struct.unpack_from(">H", h11, 14)[0]
+    product_id = struct.unpack_from(">H", h11, 10)[0]
     model_code = h11[12]
     start_surface = struct.unpack_from(">H", h11, 16)[0]
     serial_hex = h11[18:22].hex().upper()
@@ -226,13 +232,15 @@ def _build_header(
     firmware_build = None
     firmware_version = None
     if h18:
-        # ASCII build id sits at bytes 18..25 on Petrel 3 header v14, followed
-        # by a 2-byte (major, minor) version at bytes 26..27.
+        # Petrel 3: ASCII build id at bytes 18..25, (major, minor) at 26-27.
+        # Tern leaves this block mostly zero — firmware version location is
+        # not yet mapped on Tern.
+        if h18[26] or h18[27]:
+            firmware_version = (h18[26], h18[27])
         try:
             build = h18[18:26].decode("ascii").strip("\x00")
             if build.isprintable() and build:
                 firmware_build = build
-                firmware_version = (h18[26], h18[27])
         except UnicodeDecodeError:
             pass
 
@@ -251,13 +259,10 @@ def _build_header(
     if f24:
         end_batt = struct.unpack_from(">H", f24, 5)[0] / 100.0
 
-    product_name = _MODEL_CODES.get(
-        (product_id, model_code),
-        _PRODUCT_IDS.get(
-            product_id,
-            f"unknown(family=0x{product_id:04x},model=0x{model_code:02x})",
-        ),
-    )
+    product_name = _DEVICE_MODELS.get((product_id, model_code))
+    if product_name is None:
+        family = _DEVICE_FAMILIES.get(product_id, f"family=0x{product_id:04x}")
+        product_name = f"{family} mode=0x{model_code:02x}"
     return DiveHeader(
         dive_number=dive_number,
         serial_hex=serial_hex,
@@ -285,6 +290,7 @@ class DiveLog:
     dive_start_epoch: int | None
     header: DiveHeader | None = None
     samples: list[Sample] = field(default_factory=list)
+    freedive_samples: list[RawBlock] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
     tissues: list[TissueSnapshot] = field(default_factory=list)
     header_blocks: dict[int, bytes] = field(default_factory=dict)
@@ -329,6 +335,8 @@ def parse(path: str | Path) -> DiveLog:
                 Sample.from_block(sample_index * SAMPLE_INTERVAL_SEC, block)
             )
             sample_index += 1
+        elif tag == 0x02:
+            log.freedive_samples.append(RawBlock(off, tag, block))
         elif tag == 0x30:
             # carries dive-start epoch at bytes 4..7 BE
             log.unknown.append(RawBlock(off, tag, block))
@@ -386,6 +394,7 @@ if __name__ == "__main__":
         print(f"surface pressure = start {h.start_surface_pressure_mbar}  end {h.end_surface_pressure_mbar} mbar")
     print()
     print(f"samples          = {len(log.samples)}")
+    print(f"freedive samples = {len(log.freedive_samples)}")
     print(f"events (0x51)    = {len(log.events)}")
     print(f"tissue snapshots = {len(log.tissues)}")
     print(f"bitmaps          = {len(log.bitmaps)}")
