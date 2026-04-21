@@ -40,15 +40,16 @@ in the per-sample tail bytes.
 
 ## File format in one paragraph
 
-A `.swlogdata` is just the gzipped blob in the Shearwater Cloud SQLite
-database (`log_data.data_bytes_1`) with a 4-byte big-endian length header
-stripped — but it is also written as a standalone file when you export a
-dive. The file is a stream of 32-byte records, where the first byte of each
-record is a tag identifying the record type (header TLVs, samples,
-events, tissues, footer TLVs, padding). Most fields are little-endian, but
-a few — notably depth in the sample record and the dive-start epoch in the
-header — are big-endian. Sample timing is implicit at a fixed 10 s
-interval; there is no per-sample timestamp.
+The parser consumes a stream of 32-byte records. That stream lives in the
+Shearwater Cloud SQLite database as `log_data.data_bytes_1`, framed as
+`[4-byte little-endian uncompressed size][gzip-compressed body]` — use
+`extract_blobs.py` to unpack a whole database into one `.swlogdata` file
+per dive. The first byte of each 32-byte record is a tag identifying the
+record type (header TLVs, samples, events, tissues, footer TLVs,
+padding). Most fields are little-endian, but a few — notably depth in the
+sample record and the dive-start epoch in the header — are big-endian.
+Sample timing is implicit at a fixed 10 s interval; there is no per-sample
+timestamp.
 
 ## Usage
 
@@ -84,6 +85,18 @@ python3 validate.py <file.swlogdata> <file.csv>
 
 Output shows a `[ OK ]` / `[FAIL]` line per field with mismatch counts.
 
+## Bulk-extracting from Shearwater Cloud
+
+To dump every dive in a Shearwater Cloud database as a separate
+`.swlogdata` file (the form `parse()` consumes):
+
+```bash
+python3 extract_blobs.py <dive_data.db> <out_dir>
+```
+
+On macOS the Cloud database is at
+`~/Library/Containers/research.shearwater.cloud/Data/Library/Application Support/research.shearwater.cloud/users/<email>/dive_data.db`.
+
 ## Reverse-engineering helper
 
 `scan.py` dumps a tag-by-tag map of any `.swlogdata` file plus a count of
@@ -99,6 +112,7 @@ python3 scan.py <file.swlogdata>
 - `parser.py` — the parser. `DiveLog`, `DiveHeader`, `Sample`, `Event`, `TissueSnapshot`, `HeaderBitmap` dataclasses and a `parse()` entry point.
 - `validate.py` — CSV oracle. Diffs every parsed field against the CSV row.
 - `scan.py` — block-by-block hexdump and tag histogram.
+- `extract_blobs.py` — dump every dive in a Shearwater Cloud SQLite DB to a `.swlogdata` file.
 
 ## License
 
