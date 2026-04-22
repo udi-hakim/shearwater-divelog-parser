@@ -29,29 +29,39 @@ BLOCK_SIZE = 32
 SAMPLE_INTERVAL_SEC = 10  # confirmed from CSV (time column increments by 10)
 
 
+# Bit flags in the per-sample status byte (block[12]). Cross-referenced
+# against libdivecomputer's shearwater_predator_parser.c (GASSWITCH /
+# PPO2_EXTERNAL / SETPOINT_HIGH / SC / OC).
+STATUS_GASSWITCH     = 0x01
+STATUS_PPO2_EXTERNAL = 0x02
+STATUS_SETPOINT_HIGH = 0x04
+STATUS_SC            = 0x08
+STATUS_OC            = 0x10
+
+
 @dataclass
 class Sample:
     time_sec: int
     depth_m: float
-    first_stop_depth_m: int           # whole meters
-    tts_min: int
+    first_stop_depth_m: int           # whole meters (block[4]; high byte in block[3] is 0 for all sighted dives)
+    tts_min: int                      # minutes (block[6]; high byte in block[5] is 0 for all sighted dives)
     average_ppo2: float
     fraction_o2: float
     fraction_he: float
     ndl_or_first_stop_min: int        # NDL when first_stop_depth_m == 0, else first-stop time
-    water_temp_c: int
+    water_temp_c: int                 # signed; block[14]
     battery_voltage: float
-    # Unknowns we haven't confirmed a mapping for:
-    sensor1_mv: int                   # byte 13
-    sensor2_mv: int                   # byte 15
-    sensor3_mv: int                   # byte 16
-    # Still unmapped:
-    unknown_byte_3: int
-    unknown_byte_5: int
-    unknown_byte_11: int              # slowly-varying counter — likely CNS or GFs related
-    unknown_byte_12: int              # 0x06 in SA-CCR, 0x00 in HW-CCR — mode/flags byte
-    unknown_byte_19: int              # often mirrors byte 7 — possibly a second PPO2 reading
-    tail: bytes                       # bytes 20..31 — tank/AI, event flags, CO2
+    sensor1_mv: int                   # block[13]
+    sensor2_mv: int                   # block[15]
+    sensor3_mv: int                   # block[16]
+    status: int                       # block[12] — CCR/OC/setpoint/gas-switch flags; see STATUS_* above
+    setpoint: float                   # block[19] / 100 — CCR target PPO2 (bar)
+    cns: float                        # block[23] / 100 — CNS oxygen toxicity %
+    # Still unmapped — retained as a raw aperture for future decoding.
+    unknown_byte_5: int               # high byte of tts when it exceeds 255 min
+    unknown_byte_11: int              # slowly-varying; purpose unclear
+    unknown_byte_22: int              # adjacent to cns, purpose unclear
+    tail: bytes                       # bytes 20..31 — tank/AI pressure, gas-switch events, etc.
 
     @property
     def ndl_min(self) -> int:
@@ -61,28 +71,42 @@ class Sample:
     def first_stop_time_min(self) -> int:
         return self.ndl_or_first_stop_min if self.first_stop_depth_m > 0 else 0
 
+    @property
+    def dive_mode(self) -> str:
+        """Decoded from the status byte.
+
+        Matches libdivecomputer's logic:
+        OC flag set -> open-circuit; else SC flag set -> semi-closed;
+        otherwise closed-circuit.
+        """
+        if self.status & STATUS_OC:
+            return "OC"
+        if self.status & STATUS_SC:
+            return "SC"
+        return "CC"
+
     @classmethod
     def from_block(cls, time_sec: int, block: bytes) -> "Sample":
         assert len(block) == BLOCK_SIZE and block[0] == 0x01
         depth_be = struct.unpack_from(">H", block, 1)[0]
-        b3 = block[3]
         first_stop_m = block[4]
-        b5 = block[5]
         tts = block[6]
         ppo2_cg = block[7]
         o2_pct = block[8]
         he_pct = block[9]
         ndl_or_fs = block[10]
-        b11 = block[11]
-        b12 = block[12]
+        status = block[12]
         sensor1 = block[13]
-        water_temp = block[14]
+        # Temperature is a signed 8-bit value (supports below-freezing ice
+        # dives).  The b5-b22 "unknown" bytes are retained verbatim.
+        water_temp = struct.unpack_from("b", block, 14)[0]
         sensor2 = block[15]
         sensor3 = block[16]
         # Battery voltage: bytes 17-18 BE u16, centivolts (handles both
         # 1.5 V AA on Petrel 3 and 4 V lithium on Tern).
         batt_cv = struct.unpack_from(">H", block, 17)[0]
-        b19 = block[19]
+        setpoint_cg = block[19]
+        cns_cg = block[23]
 
         return cls(
             time_sec=time_sec,
@@ -98,11 +122,12 @@ class Sample:
             sensor1_mv=sensor1,
             sensor2_mv=sensor2,
             sensor3_mv=sensor3,
-            unknown_byte_3=b3,
-            unknown_byte_5=b5,
-            unknown_byte_11=b11,
-            unknown_byte_12=b12,
-            unknown_byte_19=b19,
+            status=status,
+            setpoint=setpoint_cg / 100.0,
+            cns=cns_cg / 100.0,
+            unknown_byte_5=block[5],
+            unknown_byte_11=block[11],
+            unknown_byte_22=block[22],
             tail=bytes(block[20:32]),
         )
 
@@ -165,6 +190,50 @@ _DEVICE_MODELS = {
 }
 
 
+# Dive-mode enum at block 0x14 byte 1 (for PNF). Indices and labels mirror
+# libdivecomputer's shearwater_predator_parser.c.
+_DIVE_MODE_LABELS = [
+    "CC / BO",          # 0  M_CC
+    "OC Technical",     # 1  M_OC_TEC
+    "Gauge",            # 2  M_GAUGE
+    "PPO2 Display",     # 3  M_PPO2
+    "SC / BO",          # 4  M_SC
+    "CC / BO 2",        # 5  M_CC2
+    "OC Recreational",  # 6  M_OC_REC
+    "Freedive",         # 7  M_FREEDIVE
+]
+
+_BATTERY_TYPES = {
+    1: "1.5V Alkaline",
+    2: "1.5V Lithium",
+    3: "1.2V NiMH",
+    4: "3.6V Saft",
+    5: "3.7V Li-Ion",
+}
+
+# Deco model enum at block 0x12 byte 18 (for PNF).
+_DECO_MODEL_NAMES = {
+    0: "GF",
+    1: "VPM-B",
+    2: "VPM-B/GFS",
+}
+
+
+@dataclass
+class GasMix:
+    """A gas mix as used on a dive.
+
+    Built by scanning the sample stream for unique (o2, he, ccr) triples —
+    the Petrel Native Format does not store a fixed gas-mix table in the
+    header. Matches libdivecomputer's approach in
+    shearwater_predator_parser.c (sample-driven gasmix accumulation).
+    """
+    fraction_o2: float        # 0.0 .. 1.0
+    fraction_he: float        # 0.0 .. 1.0
+    is_diluent: bool          # True when the gas was active during closed-circuit
+    first_seen_sec: int       # time (s) of the first sample to carry this mix
+
+
 @dataclass
 class DiveHeader:
     """Dive-level metadata extracted from the header (0x10-0x19) and footer
@@ -188,6 +257,12 @@ class DiveHeader:
     end_battery_v: float | None
     start_surface_pressure_mbar: int
     end_surface_pressure_mbar: int | None
+    # Added from libdivecomputer-cross-referenced byte offsets:
+    units: str                            # "metric" or "imperial" (h10[8])
+    salinity_g_per_l: int                 # water density; 1000 = fresh, ~1020 = salt (h13[3..4] BE)
+    dive_mode_str: str                    # e.g. "CC / BO", "OC Technical", "Freedive" (h14[1])
+    battery_type: str | None              # e.g. "1.5V Alkaline" (h14[9]); None if not encoded
+    deco_model: str                       # e.g. "GF 30/80", "VPM-B +3", "VPM-B/GFS +3 80%"
 
     @property
     def dive_start_utc(self) -> str:
@@ -208,6 +283,8 @@ def _build_header(
 ) -> DiveHeader | None:
     h10 = header_blocks.get(0x10)
     h11 = header_blocks.get(0x11)
+    h12 = header_blocks.get(0x12)
+    h13 = header_blocks.get(0x13)
     h14 = header_blocks.get(0x14)
     h18 = header_blocks.get(0x18)
     f20 = footer_blocks.get(0x20)
@@ -218,6 +295,7 @@ def _build_header(
     dive_number = h10[3]
     gf_min = h10[4]
     gf_max = h10[5]
+    units = "imperial" if h10[8] == 1 else "metric"
     # Surface interval (minutes) — verified against firmware: header writer
     # at flash 0x080329a6 computes (BKP_SRAM[0x298] + 59) / 60 and stores
     # the result big-endian here, capped at 0xFFFF.
@@ -265,6 +343,38 @@ def _build_header(
     if product_name is None:
         family = _DEVICE_FAMILIES.get(product_id, f"family=0x{product_id:04x}")
         product_name = f"{family} mode=0x{model_code:02x}"
+
+    # Salinity / water density (h13 bytes 3..4 BE) — 1000 = fresh water,
+    # ~1020 = salt. Absent block → default to 1000 (fresh) like libdc.
+    salinity = struct.unpack_from(">H", h13, 3)[0] if h13 else 1000
+
+    # Dive mode enum (h14 byte 1): 0..7 maps to labels above.
+    dive_mode_str = _DIVE_MODE_LABELS[h14[1]] if h14 and h14[1] < len(_DIVE_MODE_LABELS) else (
+        f"Unknown ({h14[1]})" if h14 else "Unknown"
+    )
+
+    # Battery type (h14 byte 9). Unsighted (zero) → leave as None rather than
+    # claiming "unknown type 0".
+    battery_type: str | None = None
+    if h14 and h14[9]:
+        battery_type = _BATTERY_TYPES.get(h14[9], f"unknown type {h14[9]}")
+
+    # Deco model: enum byte at h12[18], with param at h12[19] (VPM-B
+    # conservatism) and h13[5] (GFS percentage for VPM-B/GFS).
+    if h12 is None:
+        deco_model = f"GF {gf_min}/{gf_max}"  # safe fallback
+    else:
+        model = h12[18]
+        if model == 0:
+            deco_model = f"GF {gf_min}/{gf_max}"
+        elif model == 1:
+            deco_model = f"VPM-B +{h12[19]}"
+        elif model == 2:
+            gfs = h13[5] if h13 else 0
+            deco_model = f"VPM-B/GFS +{h12[19]} {gfs}%"
+        else:
+            deco_model = _DECO_MODEL_NAMES.get(model, f"Unknown model {model}")
+
     return DiveHeader(
         dive_number=dive_number,
         serial_hex=serial_hex,
@@ -284,7 +394,42 @@ def _build_header(
         end_battery_v=end_batt,
         start_surface_pressure_mbar=start_surface,
         end_surface_pressure_mbar=end_surface,
+        units=units,
+        salinity_g_per_l=salinity,
+        dive_mode_str=dive_mode_str,
+        battery_type=battery_type,
+        deco_model=deco_model,
     )
+
+
+def _build_gas_mixes(samples: list[Sample]) -> list[GasMix]:
+    """Extract the unique gas mixes used on this dive by scanning samples.
+
+    Mirrors libdivecomputer's sample-driven gasmix accumulation: whenever a
+    new (o2, he, is_diluent) triple appears that hasn't been seen before, it
+    is appended to the list. Sample index -> time (s) at 10 s cadence.
+    """
+    seen: list[GasMix] = []
+    for s in samples:
+        # Skip the synthetic "no gas" sample (surface, before first breath).
+        if s.fraction_o2 == 0 and s.fraction_he == 0:
+            continue
+        is_diluent = not (s.status & STATUS_OC)
+        key = (round(s.fraction_o2, 3), round(s.fraction_he, 3), is_diluent)
+        if any(
+            (round(m.fraction_o2, 3), round(m.fraction_he, 3), m.is_diluent) == key
+            for m in seen
+        ):
+            continue
+        seen.append(
+            GasMix(
+                fraction_o2=s.fraction_o2,
+                fraction_he=s.fraction_he,
+                is_diluent=is_diluent,
+                first_seen_sec=s.time_sec,
+            )
+        )
+    return seen
 
 
 @dataclass
@@ -295,6 +440,7 @@ class DiveLog:
     freedive_samples: list[RawBlock] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
     tissues: list[TissueSnapshot] = field(default_factory=list)
+    gas_mixes: list[GasMix] = field(default_factory=list)
     header_blocks: dict[int, bytes] = field(default_factory=dict)
     footer_blocks: dict[int, bytes] = field(default_factory=dict)
     bitmaps: list[HeaderBitmap] = field(default_factory=list)
@@ -372,6 +518,7 @@ def parse(path: str | Path) -> DiveLog:
             log.unknown.append(RawBlock(off, tag, block))
 
     log.header = _build_header(log.header_blocks, log.footer_blocks)
+    log.gas_mixes = _build_gas_mixes(log.samples)
     return log
 
 

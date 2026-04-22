@@ -27,20 +27,28 @@ Tern OC including freedive sessions.
 
 **Per-sample (every ~10 s):**
 time, depth, first-stop depth, first-stop time / NDL, TTS, average PPO2,
-fraction O2, fraction He, water temperature, battery voltage, external O2
-sensor 1/2/3 millivolts.
+fraction O2, fraction He, water temperature (signed), battery voltage,
+external O2 sensor 1/2/3 millivolts, status byte (decoded into
+OC/SC/CC `dive_mode`, gas-switch and setpoint-high flags), setpoint (CCR
+target PPO2), CNS oxygen toxicity %.
 
 **Per-dive header / footer:**
-dive number, computer serial, product id + name (Petrel 3, Tern, …),
-firmware build string and `(major, minor)` version, GF settings, dive start
-and end timestamps (UTC), max depth, max time, surface pressure (start /
-end), battery voltage (start / end).
+dive number, computer serial, product id + name (Petrel 3, Perdix 2,
+Tern, …), firmware build string and `(major, minor)` version, GF
+settings, dive start and end timestamps (UTC), max depth, max time,
+surface pressure (start / end), battery voltage (start / end), units
+(metric/imperial), water density (salinity), dive-mode enum (CC / BO,
+OC Technical, Gauge, PPO2 Display, SC / BO, CC / BO 2, OC Recreational,
+Freedive), battery type (1.5V Alkaline / 1.5V Lithium / 1.2V NiMH /
+3.6V Saft / 3.7V Li-Ion), deco model (GF `min/max`, VPM-B `+N`,
+VPM-B/GFS `+N %`), gas mixes used (O2 / He / diluent-or-OC, extracted
+by scanning samples for unique triples à la libdivecomputer).
 
 **Surfaced but not yet interpreted:**
 event markers (`0x51` blocks), tissue saturation snapshots (`0x70`–`0x75`
 float groups, ~16 N₂ + 16 He compartments per snapshot), per-sample event
 bitmaps (`0x80`–`0x87`, `0xa0`/`0xa1`), tank AI / SAC / ascent rate / CO₂
-in the per-sample tail bytes.
+in the per-sample tail bytes, freedive-sample (`0x02`) internal layout.
 
 ## File format in one paragraph
 
