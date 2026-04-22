@@ -19,9 +19,9 @@ exactly on every sample:
 | Perdix 2 | Stand-alone CCR   | 1,436 | 14 / 14 |
 | Tern     | OC nitrox         | 251   | 14 / 14 |
 
-Parses cleanly (0 errors, 0 unmapped record types) on a 120-dive bulk
-sample of 56,486 samples covering Petrel 3 SA CCR, Petrel 3 HW JJCCR, and
-Tern OC including freedive sessions.
+Parses cleanly (0 errors, 0 unmapped record types) on a 194-dive bulk
+sample covering Petrel 3 SA CCR (91), Petrel 3 HW JJCCR (17), Tern OC
+(86, including 4 freedive sessions), across log versions 14 and 17.
 
 ## What it decodes
 
