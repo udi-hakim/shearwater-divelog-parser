@@ -154,6 +154,27 @@ class Event:
     raw: bytes
 
 
+# 0x30 info-event subtype byte (`block[1]`) that carries a tag / bearing /
+# bookmark. Matches libdivecomputer's INFO_EVENT_TAG_LOG.
+INFO_EVENT_TAG_LOG = 38
+
+
+@dataclass
+class Bookmark:
+    """A user-tagged bookmark event (0x30 block with type byte == 38).
+
+    The user pressed the tag button on the dive computer at this point.
+    If the compass was active, a bearing is recorded; otherwise
+    `bearing_deg` is None. `raw_timestamp` is the u32 BE at bytes 4-7 of
+    the 0x30 block — interpretation unclear (libdivecomputer marks it as
+    unused; our earlier parser assumed it mirrors the dive-start epoch).
+    """
+    offset: int                      # byte offset of the 0x30 record
+    bearing_deg: int | None          # 0..359 or None if compass was off (0xFFFFFFFF)
+    tag_value: int                   # u32 BE at block[12..15] — user-assigned tag id
+    raw_timestamp: int               # u32 BE at block[4..7]
+
+
 @dataclass
 class TissueSnapshot:
     """A group of 0x70-0x75 blocks, each holding float32 tissue saturations.
@@ -283,6 +304,12 @@ class DiveHeader:
                                           # appears to normalize timestamps to UTC and zero this
                                           # out. Still carried for any exports that preserve it.
     is_dst: bool                          # whether DST is in effect at dive time (h15[30])
+    log_version: int                      # Shearwater log-format version (h14[16]); features are
+                                          # gated on this (e.g. CCR stack time requires >= 11).
+    ccr_stack_total_sec: int | None       # configured scrubber lifetime in seconds (h16[1..2] BE).
+                                          # None when log_version < 11 or stack time isn't set.
+    ccr_stack_remaining_start_sec: int | None  # remaining scrubber time at dive start (h16[3..4] BE)
+    ccr_stack_remaining_end_sec: int | None    # remaining scrubber time at dive end (f26[3..4] BE)
     sensor_calibration_bars_per_mv: tuple[float | None, float | None, float | None]
     """Per-O2-sensor calibration (bar / mV). None for an uncalibrated sensor.
     libdivecomputer uses these to scale raw sensor mV into PPO2."""
@@ -310,9 +337,11 @@ def _build_header(
     h13 = header_blocks.get(0x13)
     h14 = header_blocks.get(0x14)
     h15 = header_blocks.get(0x15)
+    h16 = header_blocks.get(0x16)
     h18 = header_blocks.get(0x18)
     f20 = footer_blocks.get(0x20)
     f24 = footer_blocks.get(0x24)
+    f26 = footer_blocks.get(0x26)
     if not (h10 and h11):
         return None
 
@@ -422,6 +451,24 @@ def _build_header(
                 calib[i] = raw / 100000.0
     sensor_calibration = (calib[0], calib[1], calib[2])
 
+    # Log version (h14[16]). libdivecomputer gates a handful of features
+    # on this (AI layout, tank naming, stack time, …).
+    log_version = h14[16] if h14 else 0
+
+    # CCR scrubber stack time (log_version >= 11). Values are seconds.
+    # A total of 0 means stack-time tracking is disabled; in that case
+    # libdc skips the remaining fields, so we do the same.
+    ccr_stack_total = None
+    ccr_stack_remaining_start = None
+    ccr_stack_remaining_end = None
+    if h16 and log_version >= 11:
+        total = struct.unpack_from(">H", h16, 1)[0]
+        if total > 0:
+            ccr_stack_total = total
+            ccr_stack_remaining_start = struct.unpack_from(">H", h16, 3)[0]
+            if f26:
+                ccr_stack_remaining_end = struct.unpack_from(">H", f26, 3)[0]
+
     return DiveHeader(
         dive_number=dive_number,
         serial_hex=serial_hex,
@@ -449,6 +496,10 @@ def _build_header(
         utc_offset_min=utc_offset_min,
         is_dst=is_dst,
         sensor_calibration_bars_per_mv=sensor_calibration,
+        log_version=log_version,
+        ccr_stack_total_sec=ccr_stack_total,
+        ccr_stack_remaining_start_sec=ccr_stack_remaining_start,
+        ccr_stack_remaining_end_sec=ccr_stack_remaining_end,
     )
 
 
@@ -491,6 +542,7 @@ class DiveLog:
     events: list[Event] = field(default_factory=list)
     tissues: list[TissueSnapshot] = field(default_factory=list)
     gas_mixes: list[GasMix] = field(default_factory=list)
+    bookmarks: list[Bookmark] = field(default_factory=list)
     header_blocks: dict[int, bytes] = field(default_factory=dict)
     footer_blocks: dict[int, bytes] = field(default_factory=dict)
     bitmaps: list[HeaderBitmap] = field(default_factory=list)
@@ -536,8 +588,23 @@ def parse(path: str | Path) -> DiveLog:
         elif tag == 0x02:
             log.freedive_samples.append(RawBlock(off, tag, block))
         elif tag == 0x30:
-            # carries dive-start epoch at bytes 4..7 BE
-            log.unknown.append(RawBlock(off, tag, block))
+            # Info-event record. libdivecomputer handles one subtype
+            # (INFO_EVENT_TAG_LOG = 38 = tagged bookmark with optional
+            # compass bearing); other subtypes pass through unparsed.
+            if block[1] == INFO_EVENT_TAG_LOG:
+                bearing_raw = struct.unpack_from(">I", block, 8)[0]
+                tag_value = struct.unpack_from(">I", block, 12)[0]
+                timestamp = struct.unpack_from(">I", block, 4)[0]
+                log.bookmarks.append(
+                    Bookmark(
+                        offset=off,
+                        bearing_deg=None if bearing_raw == 0xFFFFFFFF else bearing_raw,
+                        tag_value=tag_value,
+                        raw_timestamp=timestamp,
+                    )
+                )
+            else:
+                log.unknown.append(RawBlock(off, tag, block))
         elif tag == 0x51:
             log.events.append(Event(offset=off, raw=block))
         elif 0x70 <= tag <= 0x75:

@@ -47,7 +47,15 @@ by scanning samples for unique triples à la libdivecomputer), UTC
 offset (minutes, when preserved by the exporter — note that Shearwater
 Cloud tends to strip TZ on Petrel/Perdix exports but preserves it on
 Tern), DST flag, per-O2-sensor calibration (bar / mV, one value per
-calibrated sensor).
+calibrated sensor), log-format version, CCR scrubber stack time
+(configured total, remaining at dive start, remaining at dive end —
+requires log version ≥ 11).
+
+**Bookmarks / compass bearing:**
+per-dive list of user-tagged bookmark events (tag value + optional
+compass bearing in degrees). Decoded from `0x30` info-event records
+with subtype byte `38` (`INFO_EVENT_TAG_LOG`). Other `0x30` subtypes
+are preserved in the `unknown` list.
 
 **Surfaced but not yet interpreted:**
 event markers (`0x51` blocks), tissue saturation snapshots (`0x70`–`0x75`
