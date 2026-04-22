@@ -85,6 +85,21 @@ class Sample:
             return "SC"
         return "CC"
 
+    @property
+    def is_gas_switch(self) -> bool:
+        """True if this sample marks a gas switch (status bit 0)."""
+        return bool(self.status & STATUS_GASSWITCH)
+
+    @property
+    def setpoint_is_high(self) -> bool:
+        """True if the CCR high setpoint is active on this sample (vs low)."""
+        return bool(self.status & STATUS_SETPOINT_HIGH)
+
+    @property
+    def has_external_ppo2(self) -> bool:
+        """True if external O2 sensors are being used (CCR-only)."""
+        return bool(self.status & STATUS_PPO2_EXTERNAL)
+
     @classmethod
     def from_block(cls, time_sec: int, block: bytes) -> "Sample":
         assert len(block) == BLOCK_SIZE and block[0] == 0x01
@@ -263,6 +278,14 @@ class DiveHeader:
     dive_mode_str: str                    # e.g. "CC / BO", "OC Technical", "Freedive" (h14[1])
     battery_type: str | None              # e.g. "1.5V Alkaline" (h14[9]); None if not encoded
     deco_model: str                       # e.g. "GF 30/80", "VPM-B +3", "VPM-B/GFS +3 80%"
+    utc_offset_min: int                   # signed; UTC offset in minutes (h15[26..29] BE i32).
+                                          # 0 in standalone .swlogdata exports — Cloud's exporter
+                                          # appears to normalize timestamps to UTC and zero this
+                                          # out. Still carried for any exports that preserve it.
+    is_dst: bool                          # whether DST is in effect at dive time (h15[30])
+    sensor_calibration_bars_per_mv: tuple[float | None, float | None, float | None]
+    """Per-O2-sensor calibration (bar / mV). None for an uncalibrated sensor.
+    libdivecomputer uses these to scale raw sensor mV into PPO2."""
 
     @property
     def dive_start_utc(self) -> str:
@@ -286,6 +309,7 @@ def _build_header(
     h12 = header_blocks.get(0x12)
     h13 = header_blocks.get(0x13)
     h14 = header_blocks.get(0x14)
+    h15 = header_blocks.get(0x15)
     h18 = header_blocks.get(0x18)
     f20 = footer_blocks.get(0x20)
     f24 = footer_blocks.get(0x24)
@@ -375,6 +399,29 @@ def _build_header(
         else:
             deco_model = _DECO_MODEL_NAMES.get(model, f"Unknown model {model}")
 
+    # UTC offset (minutes, signed) and DST flag (h15[26..30]). libdivecomputer
+    # stores this raw as a BE i32. Empirically on Shearwater the unit is
+    # minutes: Tern dive at IST shows 120 = 2 hours, matching libdc's Subsurface
+    # consumers that multiply by 60 to get seconds.
+    if h15:
+        utc_offset_min = struct.unpack_from(">i", h15, 26)[0]
+        is_dst = bool(h15[30])
+    else:
+        utc_offset_min = 0
+        is_dst = False
+
+    # Sensor calibration (h13): bitmap at byte 6, three BE u16 values at
+    # bytes 7..12. Raw value is (mV per bar PPO2) × 100000, so divide by
+    # 100000 to get bar per mV — the inverse of the ratio libdc caches.
+    calib: list[float | None] = [None, None, None]
+    if h13:
+        bitmap = h13[6]
+        for i in range(3):
+            if bitmap & (1 << i):
+                raw = struct.unpack_from(">H", h13, 7 + i * 2)[0]
+                calib[i] = raw / 100000.0
+    sensor_calibration = (calib[0], calib[1], calib[2])
+
     return DiveHeader(
         dive_number=dive_number,
         serial_hex=serial_hex,
@@ -399,6 +446,9 @@ def _build_header(
         dive_mode_str=dive_mode_str,
         battery_type=battery_type,
         deco_model=deco_model,
+        utc_offset_min=utc_offset_min,
+        is_dst=is_dst,
+        sensor_calibration_bars_per_mv=sensor_calibration,
     )
 
 

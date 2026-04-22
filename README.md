@@ -29,8 +29,9 @@ Tern OC including freedive sessions.
 time, depth, first-stop depth, first-stop time / NDL, TTS, average PPO2,
 fraction O2, fraction He, water temperature (signed), battery voltage,
 external O2 sensor 1/2/3 millivolts, status byte (decoded into
-OC/SC/CC `dive_mode`, gas-switch and setpoint-high flags), setpoint (CCR
-target PPO2), CNS oxygen toxicity %.
+OC/SC/CC `dive_mode`, `is_gas_switch`, `setpoint_is_high`,
+`has_external_ppo2` flags), setpoint (CCR target PPO2), CNS oxygen
+toxicity %.
 
 **Per-dive header / footer:**
 dive number, computer serial, product id + name (Petrel 3, Perdix 2,
@@ -42,7 +43,11 @@ OC Technical, Gauge, PPO2 Display, SC / BO, CC / BO 2, OC Recreational,
 Freedive), battery type (1.5V Alkaline / 1.5V Lithium / 1.2V NiMH /
 3.6V Saft / 3.7V Li-Ion), deco model (GF `min/max`, VPM-B `+N`,
 VPM-B/GFS `+N %`), gas mixes used (O2 / He / diluent-or-OC, extracted
-by scanning samples for unique triples à la libdivecomputer).
+by scanning samples for unique triples à la libdivecomputer), UTC
+offset (minutes, when preserved by the exporter — note that Shearwater
+Cloud tends to strip TZ on Petrel/Perdix exports but preserves it on
+Tern), DST flag, per-O2-sensor calibration (bar / mV, one value per
+calibrated sensor).
 
 **Surfaced but not yet interpreted:**
 event markers (`0x51` blocks), tissue saturation snapshots (`0x70`–`0x75`
